@@ -17,22 +17,38 @@ An MCP server for [Internxt Drive CLI](https://github.com/internxt/cli). This se
 
 ## Installation
 
-### For Claude Desktop
+### With uvx (Recommended)
 
-Add this to your `claude_desktop_config.json`:
+The easiest way to use this server is with `uvx`. No manual installation of the script is required:
+
+```json
+{
+  "mcpServers": {
+    "internxt": {
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/mamorett/internxt-mcp", "internxt-mcp"]
+    }
+  }
+}
+```
+
+### Manual Installation (Claude Desktop)
+
+If you prefer to run the script directly:
+
+1. Clone the repository: `git clone https://github.com/mamorett/internxt-mcp`
+2. Add this to your `claude_desktop_config.json`:
 
 ```json
 {
   "mcpServers": {
     "internxt": {
       "command": "python",
-      "args": ["/path/to/internxt_mcp_server.py"]
+      "args": ["/absolute/path/to/internxt_mcp_server.py"]
     }
   }
 }
 ```
-
-*Note: Replace `/path/to/` with the actual path to the script.*
 
 ---
 
