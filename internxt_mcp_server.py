@@ -2,7 +2,6 @@
 Internxt MCP Server
 ===================
 MCP server wrapping the Internxt CLI (@internxt/cli).
-Uses the high-level FastMCP SDK for reliable tool identification by LLMs.
 
 Prerequisites:
   npm install -g @internxt/cli
@@ -15,9 +14,11 @@ Usage:
 
 import asyncio
 import json
+import sys
 from typing import Any, Literal
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server import Server
+from mcp.server.stdio import stdio_server
 
 # ---------------------------------------------------------------------------
 # Helpers & Path Resolution
@@ -135,7 +136,6 @@ async def run_internxt(args: list[str], timeout: int | None = 60) -> dict[str, A
         return {"success": False, "output": str(e)}
 
 def fmt(result: dict[str, Any]) -> str:
-    """Formats the CLI result for the LLM."""
     out = result["output"]
     status = "✅" if result["success"] else "❌"
     if isinstance(out, (dict, list)):
@@ -143,31 +143,27 @@ def fmt(result: dict[str, Any]) -> str:
     return f"{status} {str(out)}"
 
 # ---------------------------------------------------------------------------
-# Server Initialization
+# Server
 # ---------------------------------------------------------------------------
 
-mcp = FastMCP("Internxt Drive")
+server = Server("internxt")
 
-# ---------------------------------------------------------------------------
-# Tools
-# ---------------------------------------------------------------------------
-
-@mcp.tool()
+@server.tool()
 async def internxt_whoami() -> str:
     """Shows the user currently logged in to the Internxt CLI."""
     return fmt(await run_internxt(["whoami"]))
 
-@mcp.tool()
+@server.tool()
 async def internxt_config() -> str:
     """Shows configuration and information for the logged-in user."""
     return fmt(await run_internxt(["config"]))
 
-@mcp.tool()
+@server.tool()
 async def internxt_logout() -> str:
     """Logs out from the Internxt account in the CLI."""
     return fmt(await run_internxt(["logout"]))
 
-@mcp.tool()
+@server.tool()
 async def internxt_list(path: str | None = None, folder_id: str | None = None) -> str:
     """
     Lists the contents of an Internxt Drive folder.
@@ -197,7 +193,7 @@ async def internxt_list(path: str | None = None, folder_id: str | None = None) -
     except ValueError as e:
         return f"❌ Error: {str(e)}"
 
-@mcp.tool()
+@server.tool()
 async def internxt_create_folder(name: str, parent_path: str | None = None, parent_id: str | None = None) -> str:
     """Creates a new folder in Internxt Drive."""
     try:
@@ -211,7 +207,7 @@ async def internxt_create_folder(name: str, parent_path: str | None = None, pare
     except ValueError as e:
         return f"❌ Error: {str(e)}"
 
-@mcp.tool()
+@server.tool()
 async def internxt_upload(file_path: str, destination_path: str | None = None, folder_id: str | None = None) -> str:
     """Uploads a local file to Internxt Drive. For multiple files, upload them one by one."""
     try:
@@ -226,7 +222,7 @@ async def internxt_upload(file_path: str, destination_path: str | None = None, f
     except ValueError as e:
         return f"❌ Error: {str(e)}"
 
-@mcp.tool()
+@server.tool()
 async def internxt_download(directory: str, path: str | None = None, file_id: str | None = None, overwrite: bool = False) -> str:
     """Downloads a file from Internxt Drive. For multiple files, download them one by one."""
     try:
@@ -244,7 +240,7 @@ async def internxt_download(directory: str, path: str | None = None, file_id: st
     except ValueError as e:
         return f"❌ Error: {str(e)}"
 
-@mcp.tool()
+@server.tool()
 async def internxt_delete_permanently(path: str | None = None, item_id: str | None = None) -> str:
     """PERMANENTLY deletes a file or folder (irreversible)."""
     try:
@@ -260,7 +256,7 @@ async def internxt_delete_permanently(path: str | None = None, item_id: str | No
     except ValueError as e:
         return f"❌ Error: {str(e)}"
 
-@mcp.tool()
+@server.tool()
 async def internxt_move(path: str | None = None, item_id: str | None = None, destination_path: str | None = None, destination_id: str | None = None) -> str:
     """Moves a file or folder into another folder."""
     try:
@@ -279,7 +275,7 @@ async def internxt_move(path: str | None = None, item_id: str | None = None, des
     except ValueError as e:
         return f"❌ Error: {str(e)}"
 
-@mcp.tool()
+@server.tool()
 async def internxt_trash(path: str | None = None, item_id: str | None = None) -> str:
     """Moves a file or folder to the trash."""
     try:
@@ -295,7 +291,7 @@ async def internxt_trash(path: str | None = None, item_id: str | None = None) ->
     except ValueError as e:
         return f"❌ Error: {str(e)}"
 
-@mcp.tool()
+@server.tool()
 async def internxt_check_auth() -> str:
     """Verifies if the user is logged into the Internxt CLI."""
     result = await run_internxt(["whoami"])
@@ -305,17 +301,17 @@ async def internxt_check_auth() -> str:
         return f"✅ Logged in as: {email}"
     return "❌ Not logged in. Run 'internxt login'."
 
-@mcp.tool()
+@server.tool()
 async def internxt_webdav(action: Literal["enable", "disable", "restart", "status"]) -> str:
     """Manages the Internxt local WebDAV server."""
     return fmt(await run_internxt(["webdav", action]))
 
-@mcp.tool()
+@server.tool()
 async def internxt_workspaces_list() -> str:
     """Lists available workspaces for the user."""
     return fmt(await run_internxt(["workspaces", "list"]))
 
-@mcp.tool()
+@server.tool()
 async def internxt_generate_upload_script(file_paths: list[str], destination_path: str | None = None, destination_id: str | None = None) -> str:
     """Generates a shell script containing 'internxt upload-file' commands for one or more files."""
     try:
@@ -334,7 +330,7 @@ async def internxt_generate_upload_script(file_paths: list[str], destination_pat
     except ValueError as e:
         return f"❌ Error: {str(e)}"
 
-@mcp.tool()
+@server.tool()
 async def internxt_generate_download_script(directory: str, remote_paths: list[str] | None = None, file_ids: list[str] | None = None, overwrite: bool = False) -> str:
     """Generates a shell script containing 'internxt download-file' commands for one or more files."""
     try:
@@ -354,5 +350,13 @@ async def internxt_generate_download_script(directory: str, remote_paths: list[s
     except ValueError as e:
         return f"❌ Error: {str(e)}"
 
+async def main():
+    async with stdio_server() as (read_stream, write_stream):
+        await server.run(read_stream, write_stream, server.create_initialization_options())
+
+def main_sync():
+    """Entry point for uvx / project scripts."""
+    asyncio.run(main())
+
 if __name__ == "__main__":
-    mcp.run()
+    main_sync()
