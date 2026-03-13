@@ -14,13 +14,12 @@ Usage:
 
 import asyncio
 import json
-import subprocess
 import sys
-from typing import Any
+from typing import Any, Literal
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import Tool, TextContent
+from mcp.types import TextContent
 
 # ---------------------------------------------------------------------------
 # Helpers & Path Resolution
@@ -28,12 +27,12 @@ from mcp.types import Tool, TextContent
 
 _root_folder_id_cache = None
 
-def get_root_folder_id() -> str:
+async def get_root_folder_id() -> str:
     global _root_folder_id_cache
     if _root_folder_id_cache:
         return _root_folder_id_cache
     
-    result = run_internxt(["whoami"])
+    result = await run_internxt(["whoami"])
     if result["success"] and isinstance(result["output"], dict):
         login_data = result["output"].get("login", {})
         user_data = login_data.get("user", {})
@@ -41,21 +40,22 @@ def get_root_folder_id() -> str:
         return _root_folder_id_cache
     return None
 
-def resolve_path_to_uuid(path: str) -> tuple[str, str]:
+async def resolve_path_to_uuid(path: str) -> tuple[str, str]:
     """
     Resolves a path like 'folder/subfolder/file.txt' to its (UUID, type).
     Returns (UUID, type) if found, otherwise raises ValueError.
     Type is either 'folder' or 'file'.
     """
     if not path or path in ["/", "root"]:
-        return get_root_folder_id(), "folder"
+        root_id = await get_root_folder_id()
+        return root_id, "folder"
 
     parts = [p for p in path.strip("/").split("/") if p]
-    current_id = get_root_folder_id()
+    current_id = await get_root_folder_id()
     current_type = "folder"
 
     for i, part in enumerate(parts):
-        res = run_internxt(["list", "--id", current_id])
+        res = await run_internxt(["list", "-i", current_id])
         if not res["success"]:
             raise ValueError(f"Failed to list folder at '{'/'.join(parts[:i])}': {res['output']}")
         
@@ -90,50 +90,58 @@ def resolve_path_to_uuid(path: str) -> tuple[str, str]:
     
     return current_id, current_type
 
-def run_internxt(args: list[str], timeout: int | None = 60) -> dict[str, Any]:
+async def run_internxt(args: list[str], timeout: int | None = 60) -> dict[str, Any]:
     """
     Executes `internxt <args>` with --json and -x (non-interactive) flags.
     Returns {"success": bool, "output": str | dict}.
     """
     cmd = ["internxt"] + args + ["--json", "-x"]
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
-        stdout = result.stdout.strip()
-        stderr = result.stderr.strip()
+        
+        try:
+            if timeout:
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+            else:
+                stdout, stderr = await process.communicate()
+        except asyncio.TimeoutError:
+            try:
+                process.kill()
+            except:
+                pass
+            return {"success": False, "output": f"Timeout after {timeout}s"}
 
-        if result.returncode != 0:
+        stdout_str = stdout.decode().strip()
+        stderr_str = stderr.decode().strip()
+
+        if process.returncode != 0:
             return {
                 "success": False,
-                "output": stderr or stdout or f"Exit code {result.returncode}",
+                "output": stderr_str or stdout_str or f"Exit code {process.returncode}",
             }
 
-        if stdout:
+        if stdout_str:
             try:
-                parsed = json.loads(stdout)
+                parsed = json.loads(stdout_str)
                 return {"success": True, "output": parsed}
             except json.JSONDecodeError:
-                return {"success": True, "output": stdout}
+                return {"success": True, "output": stdout_str}
 
         return {"success": True, "output": "OK"}
 
-    except subprocess.TimeoutExpired:
-        return {"success": False, "output": f"Timeout after {timeout}s"}
-    except FileNotFoundError:
-        return {
-            "success": False,
-            "output": "Command 'internxt' not found. Install it with: npm install -g @internxt/cli",
-        }
+    except Exception as e:
+        return {"success": False, "output": str(e)}
 
 def fmt(result: dict[str, Any]) -> str:
     out = result["output"]
+    status = "✅" if result["success"] else "❌"
     if isinstance(out, (dict, list)):
-        return json.dumps(out, indent=2, ensure_ascii=False)
-    return str(out)
+        return f"{status} {json.dumps(out, indent=2, ensure_ascii=False)}"
+    return f"{status} {str(out)}"
 
 # ---------------------------------------------------------------------------
 # Server
@@ -141,415 +149,207 @@ def fmt(result: dict[str, Any]) -> str:
 
 server = Server("internxt")
 
-@server.list_tools()
-async def list_tools() -> list[Tool]:
-    return [
-        Tool(
-            name="internxt_whoami",
-            description="Shows the user currently logged in to the Internxt CLI.",
-            inputSchema={"type": "object", "properties": {}, "required": []},
-        ),
-        Tool(
-            name="internxt_config",
-            description="Shows configuration and information for the logged-in user.",
-            inputSchema={"type": "object", "properties": {}, "required": []},
-        ),
-        Tool(
-            name="internxt_logout",
-            description="Logs out from the Internxt account in the CLI.",
-            inputSchema={"type": "object", "properties": {}, "required": []},
-        ),
-        Tool(
-            name="internxt_list",
-            description=(
-                "Lists the contents of an Internxt Drive folder. "
-                "Accepts either a human-readable path (e.g., 'Photos/Summer') or a folder UUID. "
-                "If neither is specified, it lists the root folder."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Human-readable path to list (e.g., 'Documents/Work').",
-                    },
-                    "folder_id": {
-                        "type": "string",
-                        "description": "UUID of the folder to list.",
-                    }
-                },
-                "required": [],
-            },
-        ),
-        Tool(
-            name="internxt_create_folder",
-            description="Creates a new folder in Internxt Drive.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "Name of the new folder.",
-                    },
-                    "parent_path": {
-                        "type": "string",
-                        "description": "Human-readable path of the parent folder.",
-                    },
-                    "parent_id": {
-                        "type": "string",
-                        "description": "UUID of the parent folder.",
-                    },
-                },
-                "required": ["name"],
-            },
-        ),
-        Tool(
-            name="internxt_upload",
-            description="Uploads a local file to Internxt Drive. For multiple files, upload them one by one.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "file_path": {
-                        "type": "string",
-                        "description": "Local path of the file to upload.",
-                    },
-                    "destination_path": {
-                        "type": "string",
-                        "description": "Remote path where the file will be uploaded.",
-                    },
-                    "folder_id": {
-                        "type": "string",
-                        "description": "UUID of the destination folder.",
-                    },
-                },
-                "required": ["file_path"],
-            },
-        ),
-        Tool(
-            name="internxt_download",
-            description="Downloads a file from Internxt Drive. For multiple files, download them one by one.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Human-readable path of the file to download.",
-                    },
-                    "file_id": {
-                        "type": "string",
-                        "description": "UUID of the file to download.",
-                    },
-                    "directory": {
-                        "type": "string",
-                        "description": "Local directory path where the file will be saved.",
-                    },
-                    "overwrite": {
-                        "type": "boolean",
-                        "description": "Overwrite the file if it already exists.",
-                        "default": False,
-                    },
-                },
-                "required": ["directory"],
-            },
-        ),
-        Tool(
-            name="internxt_delete_permanently",
-            description="PERMANENTLY deletes a file or folder (irreversible).",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Human-readable path of the item to delete.",
-                    },
-                    "item_id": {
-                        "type": "string",
-                        "description": "UUID of the item to delete.",
-                    }
-                },
-                "required": [],
-            },
-        ),
-        Tool(
-            name="internxt_move",
-            description="Moves a file or folder into another folder.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Human-readable path of the item to move.",
-                    },
-                    "item_id": {
-                        "type": "string",
-                        "description": "UUID of the item to move.",
-                    },
-                    "destination_path": {
-                        "type": "string",
-                        "description": "Human-readable path of the destination folder.",
-                    },
-                    "destination_id": {
-                        "type": "string",
-                        "description": "UUID of the destination folder.",
-                    },
-                },
-                "required": [],
-            },
-        ),
-        Tool(
-            name="internxt_trash",
-            description="Moves a file or folder to the trash.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Human-readable path of the item to trash.",
-                    },
-                    "item_id": {
-                        "type": "string",
-                        "description": "UUID of the item to trash.",
-                    }
-                },
-                "required": [],
-            },
-        ),
-        Tool(
-            name="internxt_check_auth",
-            description="Verifies if the user is logged into the Internxt CLI.",
-            inputSchema={"type": "object", "properties": {}, "required": []},
-        ),
-        Tool(
-            name="internxt_webdav",
-            description="Manages the Internxt local WebDAV server (enable, disable, restart, status).",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "action": {
-                        "type": "string",
-                        "enum": ["enable", "disable", "restart", "status"],
-                    }
-                },
-                "required": ["action"],
-            },
-        ),
-        Tool(
-            name="internxt_workspaces_list",
-            description="Lists available workspaces for the user.",
-            inputSchema={"type": "object", "properties": {}, "required": []},
-        ),
-        Tool(
-            name="internxt_generate_upload_script",
-            description="Generates a shell script containing 'internxt upload-file' commands for one or more files.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "file_paths": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "List of local file paths to upload.",
-                    },
-                    "destination_path": {
-                        "type": "string",
-                        "description": "Remote path where the files will be uploaded.",
-                    },
-                    "destination_id": {
-                        "type": "string",
-                        "description": "UUID of the destination folder (fallback).",
-                    },
-                },
-                "required": ["file_paths"],
-            },
-        ),
-        Tool(
-            name="internxt_generate_download_script",
-            description="Generates a shell script containing 'internxt download-file' commands for one or more files.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "remote_paths": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "List of remote file paths to download.",
-                    },
-                    "file_ids": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "List of file UUIDs to download (fallback).",
-                    },
-                    "directory": {
-                        "type": "string",
-                        "description": "Local directory path where the files will be saved.",
-                    },
-                    "overwrite": {
-                        "type": "boolean",
-                        "description": "Include the overwrite flag in the commands.",
-                        "default": False,
-                    },
-                },
-                "required": ["directory"],
-            },
-        ),
-    ]
+@server.tool()
+async def internxt_whoami() -> str:
+    """Shows the user currently logged in to the Internxt CLI."""
+    return fmt(await run_internxt(["whoami"]))
 
-@server.call_tool()
-async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
+@server.tool()
+async def internxt_config() -> str:
+    """Shows configuration and information for the logged-in user."""
+    return fmt(await run_internxt(["config"]))
+
+@server.tool()
+async def internxt_logout() -> str:
+    """Logs out from the Internxt account in the CLI."""
+    return fmt(await run_internxt(["logout"]))
+
+@server.tool()
+async def internxt_list(path: str | None = None, folder_id: str | None = None) -> str:
+    """
+    Lists the contents of an Internxt Drive folder.
+    Accepts either a human-readable path (e.g., 'Photos/Summer') or a folder UUID.
+    If neither is specified, it lists the root folder.
+    """
     try:
-        result = _dispatch(name, arguments)
-        status = "✅" if result["success"] else "❌"
-        return [TextContent(type="text", text=f"{status} {fmt(result)}")]
+        if not folder_id and path:
+            folder_id, _ = await resolve_path_to_uuid(path)
+        
+        cmd = ["list"]
+        if folder_id:
+            cmd += ["-i", folder_id]
+            
+        res = await run_internxt(cmd)
+        if res["success"] and isinstance(res["output"], dict):
+            list_data = res["output"].get("list", {})
+            folders = list_data.get("folders", [])
+            files = list_data.get("files", [])
+            clean = []
+            for f in folders:
+                clean.append({"name": f.get("plainName"), "type": "folder", "uuid": f.get("uuid")})
+            for f in files:
+                clean.append({"name": f.get("plainName"), "type": "file", "uuid": f.get("uuid"), "size": f.get("size")})
+            return fmt({"success": True, "output": clean})
+        return fmt(res)
     except ValueError as e:
-        return [TextContent(type="text", text=f"❌ Error: {str(e)}")]
-    except Exception as e:
-        return [TextContent(type="text", text=f"❌ Unexpected error: {str(e)}")]
+        return f"❌ Error: {str(e)}"
 
-def _dispatch(name: str, args: dict[str, Any]) -> dict[str, Any]:
-    match name:
-        case "internxt_check_auth":
-            result = run_internxt(["whoami"])
-            if result["success"]:
-                out = result["output"]
-                email = out.get("email", out) if isinstance(out, dict) else out
-                return {"success": True, "output": f"✅ Logged in as: {email}"}
-            return {"success": False, "output": "❌ Not logged in. Run 'internxt login'."}
+@server.tool()
+async def internxt_create_folder(name: str, parent_path: str | None = None, parent_id: str | None = None) -> str:
+    """Creates a new folder in Internxt Drive."""
+    try:
+        if not parent_id and parent_path:
+            parent_id, _ = await resolve_path_to_uuid(parent_path)
+        
+        cmd = ["create-folder", "-n", name]
+        if parent_id:
+            cmd += ["-i", parent_id]
+        return fmt(await run_internxt(cmd))
+    except ValueError as e:
+        return f"❌ Error: {str(e)}"
 
-        case "internxt_whoami":
-            return run_internxt(["whoami"])
+@server.tool()
+async def internxt_upload(file_path: str, destination_path: str | None = None, folder_id: str | None = None) -> str:
+    """Uploads a local file to Internxt Drive. For multiple files, upload them one by one."""
+    try:
+        if not folder_id and destination_path:
+            folder_id, _ = await resolve_path_to_uuid(destination_path)
+        
+        cmd = ["upload-file", "-f", file_path]
+        if folder_id:
+            cmd += ["-i", folder_id]
+        # No timeout for uploads
+        return fmt(await run_internxt(cmd, timeout=None))
+    except ValueError as e:
+        return f"❌ Error: {str(e)}"
 
-        case "internxt_config":
-            return run_internxt(["config"])
-
-        case "internxt_logout":
-            return run_internxt(["logout"])
-
-        case "internxt_list":
-            folder_id = args.get("folder_id")
-            if not folder_id and (path := args.get("path")):
-                folder_id, _ = resolve_path_to_uuid(path)
-            cmd = ["list"]
-            if folder_id:
-                cmd += ["-i", folder_id]
-            res = run_internxt(cmd)
-            if res["success"] and isinstance(res["output"], dict):
-                list_data = res["output"].get("list", {})
-                folders = list_data.get("folders", [])
-                files = list_data.get("files", [])
-                clean = []
-                for f in folders:
-                    clean.append({"name": f.get("plainName"), "type": "folder", "uuid": f.get("uuid")})
-                for f in files:
-                    clean.append({"name": f.get("plainName"), "type": "file", "uuid": f.get("uuid"), "size": f.get("size")})
-                return {"success": True, "output": clean}
-            return res
-
-        case "internxt_create_folder":
-            parent_id = args.get("parent_id")
-            if not parent_id and (path := args.get("parent_path")):
-                parent_id, _ = resolve_path_to_uuid(path)
-            cmd = ["create-folder", "-n", args["name"]]
-            if parent_id:
-                cmd += ["-i", parent_id]
-            return run_internxt(cmd)
-
-        case "internxt_upload":
-            folder_id = args.get("folder_id")
-            if not folder_id and (path := args.get("destination_path")):
-                folder_id, _ = resolve_path_to_uuid(path)
-            cmd = ["upload-file", "-f", args["file_path"]]
-            if folder_id:
-                cmd += ["-i", folder_id]
-            # No timeout for uploads
-            return run_internxt(cmd, timeout=None)
-
-        case "internxt_download":
-            file_id = args.get("file_id")
-            if not file_id and (path := args.get("path")):
-                file_id, _ = resolve_path_to_uuid(path)
-            if not file_id:
-                return {"success": False, "output": "File ID or path required."}
-            cmd = ["download-file", "-i", file_id, "-d", args["directory"]]
-            if args.get("overwrite"):
-                cmd.append("--overwrite")
-            # No timeout for downloads
-            return run_internxt(cmd, timeout=None)
-
-        case "internxt_delete_permanently":
-            item_id = args.get("item_id")
-            item_type = None
-            if not item_id and (path := args.get("path")):
-                item_id, item_type = resolve_path_to_uuid(path)
-            if not item_id:
-                return {"success": False, "output": "Item ID or path required."}
-            cmd_name = "delete-permanently-folder" if item_type == "folder" else "delete-permanently-file"
-            return run_internxt([cmd_name, "-i", item_id])
-
-        case "internxt_move":
-            item_id = args.get("item_id")
-            item_type = None
-            if not item_id and (path := args.get("path")):
-                item_id, item_type = resolve_path_to_uuid(path)
-            dest_id = args.get("destination_id")
-            if not dest_id and (dpath := args.get("destination_path")):
-                dest_id, _ = resolve_path_to_uuid(dpath)
-            if not item_id or not dest_id:
-                return {"success": False, "output": "Item and destination required."}
-            cmd_name = "move-folder" if item_type == "folder" else "move-file"
-            return run_internxt([cmd_name, "-i", item_id, "-d", dest_id])
-
-        case "internxt_trash":
-            item_id = args.get("item_id")
-            item_type = None
-            if not item_id and (path := args.get("path")):
-                item_id, item_type = resolve_path_to_uuid(path)
-            if not item_id:
-                return {"success": False, "output": "Item ID or path required."}
-            cmd_name = "trash-folder" if item_type == "folder" else "trash-file"
-            return run_internxt([cmd_name, "-i", item_id])
-
-        case "internxt_webdav":
-            return run_internxt(["webdav", args["action"]])
-
-        case "internxt_workspaces_list":
-            return run_internxt(["workspaces", "list"])
-
-        case "internxt_generate_upload_script":
-            dest_id = args.get("destination_id")
-            if not dest_id and (path := args.get("destination_path")):
-                dest_id, _ = resolve_path_to_uuid(path)
+@server.tool()
+async def internxt_download(directory: str, path: str | None = None, file_id: str | None = None, overwrite: bool = False) -> str:
+    """Downloads a file from Internxt Drive. For multiple files, download them one by one."""
+    try:
+        if not file_id and path:
+            file_id, _ = await resolve_path_to_uuid(path)
+        
+        if not file_id:
+            return "❌ Error: File ID or path required."
             
-            # Default to root if no ID or path is provided
-            if not dest_id:
-                dest_id = get_root_folder_id()
-                
-            file_paths = args["file_paths"]
-            script_lines = ["#!/bin/bash"]
-            for f in file_paths:
-                # Basic escaping for paths with spaces
-                escaped_f = f"\"{f}\"" if " " in f else f
-                script_lines.append(f"internxt upload-file -i {dest_id} -f {escaped_f}")
-            
-            return {"success": True, "output": "\n".join(script_lines)}
+        cmd = ["download-file", "-i", file_id, "-d", directory]
+        if overwrite:
+            cmd.append("--overwrite")
+        # No timeout for downloads
+        return fmt(await run_internxt(cmd, timeout=None))
+    except ValueError as e:
+        return f"❌ Error: {str(e)}"
 
-        case "internxt_generate_download_script":
-            directory = args.get("directory", ".")
-            overwrite_flag = " -o" if args.get("overwrite") else ""
-            script_lines = ["#!/bin/bash"]
-            
-            # Handle remote paths
-            if remote_paths := args.get("remote_paths"):
-                for p in remote_paths:
-                    file_id, _ = resolve_path_to_uuid(p)
-                    script_lines.append(f"internxt download-file -i {file_id} -d {directory}{overwrite_flag}")
-            
-            # Handle file IDs
-            if file_ids := args.get("file_ids"):
-                for fid in file_ids:
-                    script_lines.append(f"internxt download-file -i {fid} -d {directory}{overwrite_flag}")
-            
-            return {"success": True, "output": "\n".join(script_lines)}
+@server.tool()
+async def internxt_delete_permanently(path: str | None = None, item_id: str | None = None) -> str:
+    """PERMANENTLY deletes a file or folder (irreversible)."""
+    try:
+        item_type = None
+        if not item_id and path:
+            item_id, item_type = await resolve_path_to_uuid(path)
+        
+        if not item_id:
+            return "❌ Error: Item ID or path required."
+        
+        cmd_name = "delete-permanently-folder" if item_type == "folder" else "delete-permanently-file"
+        return fmt(await run_internxt([cmd_name, "-i", item_id]))
+    except ValueError as e:
+        return f"❌ Error: {str(e)}"
 
-        case _:
-            return {"success": False, "output": f"Unknown tool: {name}"}
+@server.tool()
+async def internxt_move(path: str | None = None, item_id: str | None = None, destination_path: str | None = None, destination_id: str | None = None) -> str:
+    """Moves a file or folder into another folder."""
+    try:
+        item_type = None
+        if not item_id and path:
+            item_id, item_type = await resolve_path_to_uuid(path)
+        
+        if not destination_id and destination_path:
+            destination_id, _ = await resolve_path_to_uuid(destination_path)
+            
+        if not item_id or not destination_id:
+            return "❌ Error: Item and destination required."
+            
+        cmd_name = "move-folder" if item_type == "folder" else "move-file"
+        return fmt(await run_internxt([cmd_name, "-i", item_id, "-d", destination_id]))
+    except ValueError as e:
+        return f"❌ Error: {str(e)}"
+
+@server.tool()
+async def internxt_trash(path: str | None = None, item_id: str | None = None) -> str:
+    """Moves a file or folder to the trash."""
+    try:
+        item_type = None
+        if not item_id and path:
+            item_id, item_type = await resolve_path_to_uuid(path)
+            
+        if not item_id:
+            return "❌ Error: Item ID or path required."
+            
+        cmd_name = "trash-folder" if item_type == "folder" else "trash-file"
+        return fmt(await run_internxt([cmd_name, "-i", item_id]))
+    except ValueError as e:
+        return f"❌ Error: {str(e)}"
+
+@server.tool()
+async def internxt_check_auth() -> str:
+    """Verifies if the user is logged into the Internxt CLI."""
+    result = await run_internxt(["whoami"])
+    if result["success"]:
+        out = result["output"]
+        email = out.get("email", out) if isinstance(out, dict) else out
+        return f"✅ Logged in as: {email}"
+    return "❌ Not logged in. Run 'internxt login'."
+
+@server.tool()
+async def internxt_webdav(action: Literal["enable", "disable", "restart", "status"]) -> str:
+    """Manages the Internxt local WebDAV server."""
+    return fmt(await run_internxt(["webdav", action]))
+
+@server.tool()
+async def internxt_workspaces_list() -> str:
+    """Lists available workspaces for the user."""
+    return fmt(await run_internxt(["workspaces", "list"]))
+
+@server.tool()
+async def internxt_generate_upload_script(file_paths: list[str], destination_path: str | None = None, destination_id: str | None = None) -> str:
+    """Generates a shell script containing 'internxt upload-file' commands for one or more files."""
+    try:
+        if not destination_id and destination_path:
+            destination_id, _ = await resolve_path_to_uuid(destination_path)
+        
+        if not destination_id:
+            destination_id = await get_root_folder_id()
+            
+        script_lines = ["#!/bin/bash"]
+        for f in file_paths:
+            escaped_f = f'"{f}"' if " " in f else f
+            script_lines.append(f"internxt upload-file -i {destination_id} -f {escaped_f}")
+        
+        return "\n".join(script_lines)
+    except ValueError as e:
+        return f"❌ Error: {str(e)}"
+
+@server.tool()
+async def internxt_generate_download_script(directory: str, remote_paths: list[str] | None = None, file_ids: list[str] | None = None, overwrite: bool = False) -> str:
+    """Generates a shell script containing 'internxt download-file' commands for one or more files."""
+    try:
+        overwrite_flag = " -o" if overwrite else ""
+        script_lines = ["#!/bin/bash"]
+        
+        if remote_paths:
+            for p in remote_paths:
+                file_id, _ = await resolve_path_to_uuid(p)
+                script_lines.append(f"internxt download-file -i {file_id} -d {directory}{overwrite_flag}")
+        
+        if file_ids:
+            for fid in file_ids:
+                script_lines.append(f"internxt download-file -i {fid} -d {directory}{overwrite_flag}")
+        
+        return "\n".join(script_lines)
+    except ValueError as e:
+        return f"❌ Error: {str(e)}"
 
 async def main():
     async with stdio_server() as (read_stream, write_stream):
