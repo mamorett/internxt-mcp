@@ -90,7 +90,7 @@ def resolve_path_to_uuid(path: str) -> tuple[str, str]:
     
     return current_id, current_type
 
-def run_internxt(args: list[str], timeout: int = 60) -> dict[str, Any]:
+def run_internxt(args: list[str], timeout: int | None = 60) -> dict[str, Any]:
     """
     Executes `internxt <args>` with --json and -x (non-interactive) flags.
     Returns {"success": bool, "output": str | dict}.
@@ -205,7 +205,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="internxt_upload",
-            description="Uploads a local file to Internxt Drive.",
+            description="Uploads a local file to Internxt Drive. For multiple files, upload them one by one.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -227,7 +227,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="internxt_download",
-            description="Downloads a file from Internxt Drive.",
+            description="Downloads a file from Internxt Drive. For multiple files, download them one by one.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -338,6 +338,58 @@ async def list_tools() -> list[Tool]:
             description="Lists available workspaces for the user.",
             inputSchema={"type": "object", "properties": {}, "required": []},
         ),
+        Tool(
+            name="internxt_generate_upload_script",
+            description="Generates a shell script containing 'internxt upload-file' commands for one or more files.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file_paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of local file paths to upload.",
+                    },
+                    "destination_path": {
+                        "type": "string",
+                        "description": "Remote path where the files will be uploaded.",
+                    },
+                    "destination_id": {
+                        "type": "string",
+                        "description": "UUID of the destination folder (fallback).",
+                    },
+                },
+                "required": ["file_paths"],
+            },
+        ),
+        Tool(
+            name="internxt_generate_download_script",
+            description="Generates a shell script containing 'internxt download-file' commands for one or more files.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "remote_paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of remote file paths to download.",
+                    },
+                    "file_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of file UUIDs to download (fallback).",
+                    },
+                    "directory": {
+                        "type": "string",
+                        "description": "Local directory path where the files will be saved.",
+                    },
+                    "overwrite": {
+                        "type": "boolean",
+                        "description": "Include the overwrite flag in the commands.",
+                        "default": False,
+                    },
+                },
+                "required": ["directory"],
+            },
+        ),
     ]
 
 @server.call_tool()
@@ -406,7 +458,8 @@ def _dispatch(name: str, args: dict[str, Any]) -> dict[str, Any]:
             cmd = ["upload-file", "-f", args["file_path"]]
             if folder_id:
                 cmd += ["-i", folder_id]
-            return run_internxt(cmd, timeout=300)
+            # No timeout for uploads
+            return run_internxt(cmd, timeout=None)
 
         case "internxt_download":
             file_id = args.get("file_id")
@@ -417,7 +470,8 @@ def _dispatch(name: str, args: dict[str, Any]) -> dict[str, Any]:
             cmd = ["download-file", "-i", file_id, "-d", args["directory"]]
             if args.get("overwrite"):
                 cmd.append("--overwrite")
-            return run_internxt(cmd, timeout=300)
+            # No timeout for downloads
+            return run_internxt(cmd, timeout=None)
 
         case "internxt_delete_permanently":
             item_id = args.get("item_id")
@@ -457,6 +511,42 @@ def _dispatch(name: str, args: dict[str, Any]) -> dict[str, Any]:
 
         case "internxt_workspaces_list":
             return run_internxt(["workspaces", "list"])
+
+        case "internxt_generate_upload_script":
+            dest_id = args.get("destination_id")
+            if not dest_id and (path := args.get("destination_path")):
+                dest_id, _ = resolve_path_to_uuid(path)
+            
+            # Default to root if no ID or path is provided
+            if not dest_id:
+                dest_id = get_root_folder_id()
+                
+            file_paths = args["file_paths"]
+            script_lines = ["#!/bin/bash"]
+            for f in file_paths:
+                # Basic escaping for paths with spaces
+                escaped_f = f"\"{f}\"" if " " in f else f
+                script_lines.append(f"internxt upload-file -i {dest_id} -f {escaped_f}")
+            
+            return {"success": True, "output": "\n".join(script_lines)}
+
+        case "internxt_generate_download_script":
+            directory = args.get("directory", ".")
+            overwrite_flag = " -o" if args.get("overwrite") else ""
+            script_lines = ["#!/bin/bash"]
+            
+            # Handle remote paths
+            if remote_paths := args.get("remote_paths"):
+                for p in remote_paths:
+                    file_id, _ = resolve_path_to_uuid(p)
+                    script_lines.append(f"internxt download-file -i {file_id} -d {directory}{overwrite_flag}")
+            
+            # Handle file IDs
+            if file_ids := args.get("file_ids"):
+                for fid in file_ids:
+                    script_lines.append(f"internxt download-file -i {fid} -d {directory}{overwrite_flag}")
+            
+            return {"success": True, "output": "\n".join(script_lines)}
 
         case _:
             return {"success": False, "output": f"Unknown tool: {name}"}

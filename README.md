@@ -165,17 +165,40 @@ If you prefer to run the script directly:
 
 ---
 
+#### `internxt_generate_upload_script`
+**Description:** Generates a shell script containing `internxt upload-file` commands for one or more local files. This is useful for batch uploads that you want to run yourself.
+**Parameters:**
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `file_paths` | array[string] | Yes | List of local file paths to upload |
+| `destination_path` | string | No | Remote path where the files will be uploaded |
+| `destination_id` | string | No | Destination folder UUID (fallback) |
+
+---
+
+#### `internxt_generate_download_script`
+**Description:** Generates a shell script containing `internxt download-file` commands for one or more files.
+**Parameters:**
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `remote_paths` | array[string] | No | List of remote file paths to download |
+| `file_ids` | array[string] | No | List of file UUIDs to download (fallback) |
+| `directory` | string | Yes | Local directory path where the files will be saved |
+| `overwrite` | boolean | No | Include the overwrite flag in the commands (default: `false`) |
+
+---
+
 #### `internxt_workspaces_list`
 **Description:** Lists available workspaces for the user (for business/team accounts).
 **Parameters:** None
 
 ---
 
-## Path Support Tips
+## Usage Guidelines
 
-- **Root**: Use `/` or leave the path empty to refer to your root folder.
-- **Paths**: Use forward slashes (e.g., `Documents/Invoices/2023`).
-- **Ambiguity**: If a path is ambiguous or resolution fails, you can always fallback to using the `uuid` directly.
+- **Sequential Operations**: When uploading or downloading multiple files, perform the operations **one by one**. Wait for each operation to complete before starting the next one.
+- **No Timeouts**: Upload and download operations have no timeout set at the MCP level to accommodate large files or slow connections. However, ensure your MCP client (like Claude) doesn't have its own session timeout.
+- **Path Support**: Use human-readable paths (e.g., `Documents/Reports/2023.pdf`). The server will automatically resolve these to the internal UUIDs required by Internxt.
 
 ## Development
 
