@@ -1,6 +1,7 @@
 # Internxt MCP Server
 
-An MCP server for [Internxt Drive CLI](https://github.com/internxt/cli). This server allows AI agents (like Claude) to interact with your encrypted Internxt Drive using natural language and human-readable paths.
+An MCP server for [Internxt Drive CLI](https://github.com/internxt/cli).. This server allows AI agents (like Claude) to interact with your encrypted Internxt Drive using natural language and human-readable paths. Please note Internxt Drive CLI is available for Internxt users on the Ultimate plan. Refer to [Internxt Web page](https://internxt.com) for more information.
+
 
 ## Key Features
 
